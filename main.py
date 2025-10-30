@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import httpx
 
 from database import db, create_document, get_documents
 
@@ -32,12 +33,20 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class GoogleAuthRequest(BaseModel):
+    id_token: str
+
+
 def _hash_password(password: str, salt: str) -> str:
     return hashlib.sha256((password + salt).encode("utf-8")).hexdigest()
 
 
+def _normalize_email(email: str) -> str:
+    return (email or "").strip().lower()
+
+
 def _find_user_by_email(email: str) -> Optional[dict]:
-    users = get_documents("authuser", {"email": email}, limit=1)
+    users = get_documents("authuser", {"email": _normalize_email(email)}, limit=1)
     return users[0] if users else None
 
 
@@ -120,17 +129,19 @@ def test_database():
 
 @app.post("/auth/register")
 def register(req: RegisterRequest):
-    existing = _find_user_by_email(req.email)
+    email = _normalize_email(req.email)
+    existing = _find_user_by_email(email)
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
     salt = secrets.token_hex(16)
     pw_hash = _hash_password(req.password, salt)
     user_doc = {
-        "email": req.email,
+        "email": email,
         "name": req.name or "",
         "password_hash": pw_hash,
         "salt": salt,
         "is_active": True,
+        "auth_provider": "password",
     }
     created = create_document("authuser", user_doc)
     token = _create_token(created.get("_id"))
@@ -143,7 +154,8 @@ def register(req: RegisterRequest):
 
 @app.post("/auth/login")
 def login(req: LoginRequest):
-    user = _find_user_by_email(req.email)
+    email = _normalize_email(req.email)
+    user = _find_user_by_email(email)
     if not user or not user.get("is_active", True):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     expected = _hash_password(req.password, user.get("salt", ""))
@@ -155,6 +167,49 @@ def login(req: LoginRequest):
         "token": token["token"],
         "expires_at": token["expires_at"],
     }
+
+
+@app.post("/auth/google")
+async def auth_google(req: GoogleAuthRequest):
+    # Verify the Google ID token using Google's tokeninfo endpoint
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                "https://oauth2.googleapis.com/tokeninfo",
+                params={"id_token": req.id_token},
+            )
+            if r.status_code != 200:
+                raise HTTPException(status_code=401, detail="Invalid Google token")
+            info = r.json()
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid Google token")
+
+    email = _normalize_email(info.get("email", ""))
+    if not email:
+        raise HTTPException(status_code=400, detail="Google account email not available")
+
+    name = info.get("name") or info.get("given_name") or ""
+
+    user = _find_user_by_email(email)
+    if not user:
+        # Create a new user without password
+        user_doc = {
+            "email": email,
+            "name": name,
+            "password_hash": "",
+            "salt": "",
+            "is_active": True,
+            "auth_provider": "google",
+        }
+        created = create_document("authuser", user_doc)
+        user_id = created.get("_id")
+        profile = {"id": user_id, "email": email, "name": name}
+    else:
+        user_id = user.get("_id")
+        profile = {"id": user_id, "email": user.get("email"), "name": user.get("name")}
+
+    token = _create_token(user_id)
+    return {"user": profile, "token": token["token"], "expires_at": token["expires_at"]}
 
 
 @app.get("/auth/me")
