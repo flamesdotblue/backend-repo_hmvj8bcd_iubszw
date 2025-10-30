@@ -14,7 +14,7 @@ Model name is converted to lowercase for the collection name:
 from pydantic import BaseModel, Field
 from typing import Optional
 
-# Example schemas (replace with your own):
+# Example schemas (retain for reference/other features)
 
 class User(BaseModel):
     """
@@ -38,11 +38,24 @@ class Product(BaseModel):
     category: str = Field(..., description="Product category")
     in_stock: bool = Field(True, description="Whether product is in stock")
 
-# Add your own schemas here:
-# --------------------------------------------------
+# Authentication-related schemas used by the app
 
-# Note: The Flames database viewer will automatically:
-# 1. Read these schemas from GET /schema endpoint
-# 2. Use them for document validation when creating/editing
-# 3. Handle all database operations (CRUD) directly
-# 4. You don't need to create any database endpoints!
+class AuthUser(BaseModel):
+    """
+    Auth users for application login
+    Collection name: "authuser"
+    """
+    email: str = Field(..., description="Unique email")
+    name: Optional[str] = Field(None, description="Display name")
+    password_hash: str = Field(..., description="Hex-encoded password hash")
+    salt: str = Field(..., description="Per-user salt")
+    is_active: bool = Field(True, description="Whether user can sign in")
+
+class AuthToken(BaseModel):
+    """
+    Login tokens issued after authentication
+    Collection name: "authtoken"
+    """
+    user_id: str = Field(..., description="ID of AuthUser document")
+    token: str = Field(..., description="Opaque token string")
+    expires_at: int = Field(..., description="Unix timestamp (seconds)")
